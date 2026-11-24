@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>Escáner de códigos</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; margin: 0; background: #f4f6f8; color: #1d2530; }
+  header { background: #1565c0; color: #fff; padding: 14px 16px; font-size: 18px; font-weight: 600; }
+  main { padding: 12px 16px 40px; max-width: 520px; margin: 0 auto; }
+  #visor { width: 100%; background: #000; border-radius: 10px; overflow: hidden; min-height: 180px; }
+  button { font: inherit; border: 0; border-radius: 8px; padding: 12px 14px; cursor: pointer; }
+  button:disabled { opacity: .5; cursor: default; }
+  .btn-primario { background: #1565c0; color: #fff; width: 100%; font-size: 17px; font-weight: 600; }
+  .btn-sec { background: #e3e9f0; color: #1d2530; }
+  .fila { display: flex; gap: 8px; align-items: center; }
+  .fila > * { flex: 1; }
+  label { display: block; font-size: 14px; margin: 12px 0 4px; color: #4a5563; }
+  input, select, textarea { width: 100%; font: inherit; font-size: 17px; padding: 11px; border: 1px solid #c9d1db; border-radius: 8px; background: #fff; }
+  #msgCamara { font-size: 13px; color: #4a5563; margin: 8px 0 0; }
+  #estado { margin-top: 12px; padding: 10px; border-radius: 8px; display: none; font-size: 15px; }
+  .ok { background: #e6f4ea; color: #1e6b34; }
+  .error { background: #fdecea; color: #9b1c1c; }
+  .aviso { background: #fff8e1; color: #6b5000; }
+</style>
+</head>
+<body>
+<header>Escáner de códigos</header>
+<main>
+  <div id="visor"></div>
+  <div class="fila" style="margin-top:10px">
+    <button class="btn-sec" id="btnCamara" type="button">Iniciar cámara</button>
+    <button class="btn-sec" id="btnParar" type="button" disabled>Detener</button>
+  </div>
+  <p id="msgCamara">EAN-13 y Code 128. Necesita HTTPS (GitHub Pages lo cumple). En iPhone usa Safari.</p>
+
+  <form id="formulario" autocomplete="off">
+    <label for="tipo">Tipo</label>
+    <select id="tipo">
+      <option value="Bodega">Bodega</option>
+      <option value="Medidor">Medidor</option>
+    </select>
+
+    <label for="codigo">Código</label>
+    <input id="codigo" inputmode="numeric" placeholder="Escanea o escribe el código" required>
+
+    <label for="formato">Formato</label>
+    <select id="formato">
+      <option value="EAN_13">EAN-13</option>
+      <option value="CODE_128">Code 128</option>
+      <option value="MANUAL">Manual</option>
+    </select>
+
+    <label for="cantidad" id="etiquetaCantidad">Cantidad</label>
+    <input id="cantidad" type="number" min="0" step="any" value="1" required>
+
+    <label for="usuario">Usuario</label>
+    <input id="usuario" placeholder="Tu nombre">
+
+    <label for="notas">Notas</label>
+    <textarea id="notas" rows="3"></textarea>
+
+    <div style="margin-top:16px">
+      <button class="btn-primario" id="btnGuardar" type="submit">Guardar</button>
+    </div>
+  </form>
+  <div id="estado"></div>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<script>
+  // Configuración del envío a Google Sheets (Apps Script)
+  const URL_SCRIPT = 'https://script.google.com/macros/s/AKfycbw0BXC2TIzvEl-sVyP2ZzQvPfiUyGpSDw54QkzxNzkpkl9fsfoPOhW54IiW1o6Nk1IPIw/exec';
+  const TOKEN = 'Xq7Lm2vK9pR4tZw8Nc3Yb6Hs1Df5Gj0';
+  const HOJA = 'Escaneos';
+
+  const $ = (id) => document.getElementById(id);
+  const tipo = $('tipo'), codigo = $('codigo'), formato = $('formato'), cantidad = $('cantidad');
+  const usuario = $('usuario'), notas = $('notas'), etiquetaCantidad = $('etiquetaCantidad');
+  const btnCamara = $('btnCamara'), btnParar = $('btnParar'), btnGuardar = $('btnGuardar');
+
+  let escaner = null;
+  let pausado = false;
+
+  function mostrar(texto, clase) {
+    const e = $('estado');
+    e.textContent = texto;
+    e.className = clase;
+    e.style.display = 'block';
+  }
+
+  // Bodega = cantidad; Medidor = lectura
+  function actualizarEtiqueta() {
+    etiquetaCantidad.textContent = tipo.value === 'Medidor' ? 'Lectura' : 'Cantidad';
+  }
+  tipo.addEventListener('change', actualizarEtiqueta);
+  actualizarEtiqueta();
+
+  // Recordar el usuario en este teléfono
+  try { usuario.value = localStorage.getItem('escaner_usuario') || ''; } catch (e) {}
+  usuario.addEventListener('change', () => {
+    try { localStorage.setItem('escaner_usuario', usuario.value.trim()); } catch (e) {}
+  });
+
+  async function iniciarCamara() {
+    if (typeof Html5Qrcode === 'undefined') {
+      mostrar('No se cargó el lector de códigos. Revisa tu conexión.', 'error');
+      return;
+    }
+    try {
+      escaner = new Html5Qrcode('visor', {
+        formatsToSupport: [Html5QrcodeSupportedFormats.EAN_13, Html5QrcodeSupportedFormats.CODE_128],
+        verbose: false
+      });
+      await escaner.start(
+        { facingMode: 'environment' },
+        { fps: 10, qrbox: { width: 280, height: 150 } },
+        onLectura,
+        () => {}
+      );
+      btnCamara.disabled = true;
+      btnParar.disabled = false;
+      btnCamara.textContent = 'Iniciar cámara';
+    } catch (e) {
+      escaner = null;
+      mostrar('No se pudo abrir la cámara. Revisa los permisos del navegador.', 'error');
+    }
+  }
+
+  function onLectura(texto, resultado) {
+    const f = resultado && resultado.result && resultado.result.format
+      ? resultado.result.format.formatName : '';
+    codigo.value = texto;
+    if (f === 'EAN_13' || f === 'CODE_128') formato.value = f;
+    // Pausa para no leer el mismo código varias veces
+    escaner.pause(true);
+    pausado = true;
+    btnCamara.disabled = false;
+    btnCamara.textContent = 'Escanear otro';
+    mostrar('Código leído: ' + texto, 'aviso');
+  }
+
+  btnCamara.addEventListener('click', () => {
+    if (escaner && pausado) {
+      escaner.resume();
+      pausado = false;
+      btnCamara.disabled = true;
+      btnCamara.textContent = 'Iniciar cámara';
+    } else {
+      iniciarCamara();
+    }
+  });
+
+  btnParar.addEventListener('click', async () => {
+    if (!escaner) return;
+    try { await escaner.stop(); escaner.clear(); } catch (e) {}
+    escaner = null;
+    pausado = false;
+    btnCamara.disabled = false;
+    btnCamara.textContent = 'Iniciar cámara';
+    btnParar.disabled = true;
+  });
+
+  $('formulario').addEventListener('submit', async (ev) => {
+    ev.preventDefault();
+    const datos = {
+      token: TOKEN,
+      hoja: HOJA,
+      tipo: tipo.value,
+      codigo: codigo.value.trim(),
+      formato: formato.value,
+      cantidad: Number(cantidad.value) || 0,
+      usuario: usuario.value.trim(),
+      notas: notas.value.trim()
+    };
+    if (!datos.codigo) {
+      mostrar('Escribe o escanea un código.', 'error');
+      return;
+    }
+    btnGuardar.disabled = true;
+    mostrar('Guardando…', 'aviso');
+    try {
+      // text/plain evita la comprobación previa (CORS) que Apps Script no admite
+      const r = await fetch(URL_SCRIPT, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify(datos)
+      });
+      const respuesta = await r.json();
+      if (respuesta.ok) {
+        mostrar('Guardado en la hoja.', 'ok');
+        codigo.value = '';
+        formato.value = 'MANUAL';
+        notas.value = '';
+        cantidad.value = '1';
+      } else {
+        mostrar('Error: ' + (respuesta.error || 'desconocido'), 'error');
+      }
+    } catch (e) {
+      mostrar('No se pudo enviar. Revisa la conexión y vuelve a intentar.', 'error');
+    } finally {
+      btnGuardar.disabled = false;
+    }
+  });
+</script>
+</body>
+</html>
